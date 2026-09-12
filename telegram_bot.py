@@ -56,7 +56,7 @@ WAITING_ORDER_ID, WAITING_ITEM_PICK, WAITING_ORDER_ID_FOR_ITEM, WAITING_ITEM_ID,
 
 ORDER_ITEMS_LIST_QUERY = text(
     """
-    SELECT od.food_id AS food_id, f.name AS food_name
+    SELECT od.food_id AS food_id, f.name,f.restaurant_id AS food_name
     FROM order_details od
     JOIN food f ON od.food_id = f.id
     WHERE od.order_id = :order_id
@@ -66,11 +66,13 @@ ORDER_ITEMS_LIST_QUERY = text(
 ORDER_QUERY = text(
     """
     SELECT
+    f.id AS food_id,
         f.category_id,
         f.veg,
         f.price,
         TRIM(SUBSTRING_INDEX(r.name,'|',1)) AS restaurant_name,
         o.delivery_distance,
+        o.restaurant_id,
         o.delivery_address->>'$.longitude' AS longitude,
         o.delivery_address->>'$.latitude'  AS latitude
     FROM orders o
@@ -84,9 +86,11 @@ ORDER_QUERY = text(
 ORDER_ITEM_QUERY = text(
     """
     SELECT
+        f.id AS food_id,
         f.category_id,
         f.veg,
         f.price,
+        f.restaurant_id,
         TRIM(SUBSTRING_INDEX(r.name,'|',1)) AS restaurant_name,
         o.delivery_distance,
         o.delivery_address->>'$.longitude' AS longitude,
@@ -106,6 +110,7 @@ RECOMMENDATION_QUERY = text(
             f.id,
             f.name AS food_name,
             res.name AS restaurant_name,
+            res.id AS restaurant_id,
             ca.id AS categories_id,
             ca.name AS syb_categories,
             res.longitude AS longitude,
@@ -146,6 +151,7 @@ RECOMMENDATION_QUERY = text(
           AND ri.price < (:price + 151)
           AND ri.price >= (:price - 150)
           AND ri.veg = :veg
+          And ri.id <> :food_id
           AND (ri.rating_5 <> 0 OR ri.rating_4 <> 0 OR ri.rating_3 <> 0)
           AND (
                 6371 * ACOS(
@@ -213,6 +219,7 @@ async def run_df_async(query, params=None) -> pd.DataFrame:
 def build_info_obj(order_row: pd.Series) -> dict:
     return {
         "categories": int(order_row["category_id"]),
+        "food_id": int(order_row["food_id"]),
         "longitude": float(order_row["longitude"]),
         "latitude": float(order_row["latitude"]),
         "veg": int(order_row["veg"]),
