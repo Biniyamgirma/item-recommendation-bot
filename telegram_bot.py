@@ -2,23 +2,23 @@ import asyncio
 import sys
 import logging
 import os
-from dotenv import load_dotenv
-
-# Load environment variables from the .env file
-load_dotenv()
 import html
 import pandas as pd
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import URL
 from sqlalchemy.exc import SQLAlchemyError
-
+from dotenv import load_dotenv
+load_dotenv()
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     ConversationHandler,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -31,16 +31,112 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# NOTE: Please rotate/change your bot token and DB credentials after testing!
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+if not BOT_TOKEN:
     raise RuntimeError("Set the TELEGRAM_BOT_TOKEN environment variable before starting the bot.")
-if not DATABASE_URL or DATABASE_URL == "YOUR_DATABASE_URL_HERE":
+if not DATABASE_URL:
     raise RuntimeError("Set the DATABASE_URL environment variable before starting the bot.")
 
+ALLOWED_USERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "allowed_users.txt")
+
+if not os.path.exists(ALLOWED_USERS_FILE):
+    raise RuntimeError(
+        f"Create {ALLOWED_USERS_FILE} with one Telegram user ID per line before starting the bot."
+    )
+
+
+def load_allowed_ids() -> set[int]:
+    """Re-read the allowlist file on every call so edits take effect without a restart."""
+    ids: set[int] = set()
+    try:
+        with open(ALLOWED_USERS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                try:
+                    ids.add(int(line))
+                except ValueError:
+                    logger.warning("Ignoring invalid line in %s: %r", ALLOWED_USERS_FILE, line)
+    except OSError as e:
+        logger.error("Could not read %s: %s", ALLOWED_USERS_FILE, e)
+    return ids
+
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+
+# --------------------------------------------------------------------------
+# Query logging (separate local cPanel MySQL DB, not the business DB)
+# --------------------------------------------------------------------------
+
+LOG_DB_HOST = os.environ.get("LOG_DB_HOST", "localhost")
+LOG_DB_PORT = int(os.environ.get("LOG_DB_PORT", "3306"))
+LOG_DB_USER = os.environ.get("LOG_DB_USER")
+LOG_DB_PASS = os.environ.get("LOG_DB_PASS")
+LOG_DB_NAME = os.environ.get("LOG_DB_NAME")
+
+log_engine = None
+if LOG_DB_USER and LOG_DB_PASS and LOG_DB_NAME:
+    try:
+        log_engine = create_engine(
+            URL.create(
+                "mysql+mysqlconnector",
+                username=LOG_DB_USER,
+                password=LOG_DB_PASS,
+                host=LOG_DB_HOST,
+                port=LOG_DB_PORT,
+                database=LOG_DB_NAME,
+                query={"use_pure": "true"},
+            ),
+            pool_pre_ping=True,
+        )
+        with log_engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS bot_query_log (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        telegram_user_id BIGINT,
+                        telegram_username VARCHAR(255),
+                        order_id BIGINT NOT NULL,
+                        food_id BIGINT,
+                        requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
+    except SQLAlchemyError as e:
+        logger.error("Could not set up query-log database, logging disabled: %s", e)
+        log_engine = None
+else:
+    logger.warning("LOG_DB_* environment variables not fully set; query logging disabled.")
+
+
+def _insert_log(user_id, username, order_id: int, food_id) -> None:
+    if log_engine is None:
+        return
+    try:
+        with log_engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO bot_query_log (telegram_user_id, telegram_username, order_id, food_id)
+                    VALUES (:uid, :uname, :oid, :fid)
+                    """
+                ),
+                {"uid": user_id, "uname": username, "oid": order_id, "fid": food_id},
+            )
+    except SQLAlchemyError as e:
+        logger.warning("Failed to write query log: %s", e)
+
+
+async def log_query(update: Update, order_id: int, food_id=None) -> None:
+    user = update.effective_user
+    await asyncio.to_thread(
+        _insert_log, user.id if user else None, user.username if user else None, order_id, food_id
+    )
+
 
 TELEGRAM_MSG_LIMIT = 4000
 
@@ -56,7 +152,7 @@ WAITING_ORDER_ID, WAITING_ITEM_PICK, WAITING_ORDER_ID_FOR_ITEM, WAITING_ITEM_ID,
 
 ORDER_ITEMS_LIST_QUERY = text(
     """
-    SELECT od.food_id AS food_id, f.name,f.restaurant_id AS food_name
+    SELECT od.food_id AS food_id, f.name AS food_name
     FROM order_details od
     JOIN food f ON od.food_id = f.id
     WHERE od.order_id = :order_id
@@ -66,13 +162,12 @@ ORDER_ITEMS_LIST_QUERY = text(
 ORDER_QUERY = text(
     """
     SELECT
-    f.id AS food_id,
+        f.id AS food_id,
         f.category_id,
         f.veg,
         f.price,
         TRIM(SUBSTRING_INDEX(r.name,'|',1)) AS restaurant_name,
         o.delivery_distance,
-        o.restaurant_id,
         o.delivery_address->>'$.longitude' AS longitude,
         o.delivery_address->>'$.latitude'  AS latitude
     FROM orders o
@@ -90,7 +185,6 @@ ORDER_ITEM_QUERY = text(
         f.category_id,
         f.veg,
         f.price,
-        f.restaurant_id,
         TRIM(SUBSTRING_INDEX(r.name,'|',1)) AS restaurant_name,
         o.delivery_distance,
         o.delivery_address->>'$.longitude' AS longitude,
@@ -110,7 +204,6 @@ RECOMMENDATION_QUERY = text(
             f.id,
             f.name AS food_name,
             res.name AS restaurant_name,
-            res.id AS restaurant_id,
             ca.id AS categories_id,
             ca.name AS syb_categories,
             res.longitude AS longitude,
@@ -151,7 +244,7 @@ RECOMMENDATION_QUERY = text(
           AND ri.price < (:price + 151)
           AND ri.price >= (:price - 150)
           AND ri.veg = :veg
-          And ri.id <> :food_id
+          AND ri.id <> :food_id
           AND (ri.rating_5 <> 0 OR ri.rating_4 <> 0 OR ri.rating_3 <> 0)
           AND (
                 6371 * ACOS(
@@ -310,6 +403,18 @@ async def send_recommendations(update: Update, order_row: pd.Series) -> None:
 # Handlers
 # --------------------------------------------------------------------------
 
+async def check_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user is not None and user.id in load_allowed_ids():
+        return
+    logger.warning("Rejected unauthorized user id=%s username=%s", user.id if user else None, user.username if user else None)
+    if update.callback_query:
+        await update.callback_query.answer("You're not authorized to use this bot.", show_alert=True)
+    elif update.effective_message:
+        await update.effective_message.reply_text("You're not authorized to use this bot.")
+    raise ApplicationHandlerStop
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     keyboard = [
@@ -420,6 +525,7 @@ async def receive_item_id(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def _lookup_item_and_recommend(update: Update, order_id: int, food_id: int) -> int:
+    await log_query(update, order_id, food_id)
     try:
         order_df = await run_df_async(ORDER_ITEM_QUERY, {"order_id": order_id, "food_id": food_id})
     except SQLAlchemyError as e:
@@ -493,6 +599,7 @@ def main() -> None:
         ],
     )
 
+    app.add_handler(TypeHandler(Update, check_authorized), group=-1)
     app.add_handler(conv)
     app.add_error_handler(fallback_error)
 

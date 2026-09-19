@@ -1,0 +1,30 @@
+# One Telegram user ID per line. Lines starting with # are ignored.
+# Get an ID by messaging @userinfobot on Telegram.
+
+392884260  # Moses (you)
+
+2020809352  # Abel Amha
+574158789   # Abenezer leulseged
+337474262   # Abiy Beshada
+7835801367  # Abraham Alemu
+7524871799  # Alef Maeregu
+385470487   # Amanuel Haile
+1022953136  # Beamanuel G/meskel
+405461592   # Dagim Gulilat
+8975483554  # Dagmawi Mulatu
+422124871   # Eyob Alemayehu
+2140284770  # Girum Tamiru
+5619010798  # Helina w/kidan AND Hiwot Mesganaw were both given this same ID - verify which is correct
+506773866   # Henok Alemnew
+1993389861  # Melat Albes
+5332491054  # Melat Teshome
+545437447   # Michael Takele
+2042938968  # Nigist Mihret
+# Simegn Zewdu - no ID provided yet, add once available
+8627128790  # Sosina Melaku AND Tsion Tamrat were both given this same ID - verify which is correct
+644457906   # Sosena Tesfaye AND Tinsae Abelneh were both given this same ID - verify which is correct
+8675477523  # Winta g/slassie
+364486311   # Yeabsira Tadesse
+5533215314  # Yisakor Tewodros
+270711276   # Yordanos Zewdu
+1228599616   # Biniyam Girma
