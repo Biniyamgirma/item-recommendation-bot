@@ -309,6 +309,8 @@ async def run_df_async(query, params=None) -> pd.DataFrame:
     return await asyncio.to_thread(pd.read_sql_query, query, engine, params=params or {})
 
 
+
+
 def build_info_obj(order_row: pd.Series) -> dict:
     return {
         "categories": int(order_row["category_id"]),
