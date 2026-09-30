@@ -311,6 +311,7 @@ async def run_df_async(query, params=None) -> pd.DataFrame:
 
 
 
+
 def build_info_obj(order_row: pd.Series) -> dict:
     return {
         "categories": int(order_row["category_id"]),
